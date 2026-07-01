@@ -54,6 +54,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--epochs", type=int, default=200)
     p.add_argument("--batch_size", type=int, default=256)
     p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--recon_coef", type=float, default=1.0)
     p.add_argument("--behaviour_coef", type=float, default=1.0)
     p.add_argument("--br_coef", type=float, default=1.0)
     p.add_argument("--br_target", default="action", choices=["action", "value"],
@@ -141,7 +142,7 @@ def main() -> None:
 
     def loss_fn(params, x_std, x_raw, tgt_pol, btgt, bval, m1, m2):
         x_hat, z, logits1, logits2 = forward(params, x_std, x_raw)
-        recon = jnp.mean(jnp.sum((x_hat - x_std) ** 2, axis=-1))
+        recon = jnp.mean((x_hat - x_std) ** 2)
         behav = jnp.mean(kl(tgt_pol, jax.vmap(behaviour)(x_hat)))
         if is_value:
             # Regress the scalar best-response value instead of classifying
@@ -156,7 +157,7 @@ def main() -> None:
             ok2 = (jnp.argmax(logits2, -1) == btgt) * m2
             metric = jnp.sum(ok1 + ok2)               # count correct
         br = jnp.sum(l1 * m1 + l2 * m2) / x_std.shape[0]
-        total = recon + args.behaviour_coef * behav + args.br_coef * br
+        total = args.recon_coef * recon + args.behaviour_coef * behav + args.br_coef * br
         return total, (recon, behav, br, metric)
 
     @jax.jit

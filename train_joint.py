@@ -65,6 +65,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--epochs", type=int, default=300)
     p.add_argument("--batch_size", type=int, default=256)
     p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--recon_coef", type=float, default=1.0)
     p.add_argument("--behaviour_coef", type=float, default=1.0)
     p.add_argument("--br_coef", type=float, default=1.0,
                    help="Weight on the best-response loss (shapes the embedding).")
@@ -165,13 +166,13 @@ def main() -> None:
 
     def loss_fn(params, x_std, x_raw, tgt_pol, btgt, m_p1head, m_p2head):
         x_hat, z, logits1, logits2 = forward(params, x_std, x_raw)
-        recon = jnp.mean(jnp.sum((x_hat - x_std) ** 2, axis=-1))
+        recon = jnp.mean((x_hat - x_std) ** 2)
         behav = jnp.mean(kl(tgt_pol, jax.vmap(behaviour)(x_hat)))
         ce1 = optax.softmax_cross_entropy_with_integer_labels(logits1, btgt)
         ce2 = optax.softmax_cross_entropy_with_integer_labels(logits2, btgt)
         # Each sample contributes to exactly one head; average over all samples.
         br = jnp.sum(ce1 * m_p1head + ce2 * m_p2head) / x_std.shape[0]
-        total = recon + args.behaviour_coef * behav + args.br_coef * br
+        total = args.recon_coef * recon + args.behaviour_coef * behav + args.br_coef * br
         return total, (recon, behav, br)
 
     @jax.jit

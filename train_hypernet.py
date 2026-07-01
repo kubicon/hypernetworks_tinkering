@@ -64,6 +64,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--epochs", type=int, default=300)
     p.add_argument("--batch_size", type=int, default=256)
     p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--recon_coef", type=float, default=1.0)
     p.add_argument("--behaviour_coef", type=float, default=1.0)
     p.add_argument("--augment", action="store_true",
                    help="Apply random valid weight-space permutations each step.")
@@ -121,9 +122,10 @@ def main() -> None:
 
     def loss_fn(params, x_std, x_raw, tgt_pol):
         x_hat, _ = model.apply(params, x_std, x_raw)
-        recon = jnp.mean(jnp.sum((x_hat - x_std) ** 2, axis=-1))
+        recon = jnp.mean((x_hat - x_std) ** 2)
         behav = jnp.mean(kl(tgt_pol, jax.vmap(behaviour)(x_hat)))
-        return recon + args.behaviour_coef * behav, (recon, behav)
+        total = args.recon_coef * recon + args.behaviour_coef * behav
+        return total, (recon, behav)
 
     @jax.jit
     def update(params, opt_state, x_std, x_raw, tgt_pol):
