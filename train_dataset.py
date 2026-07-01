@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Run training with the same hyperparameters across multiple seeds.
+"""Build a weight-dataset by training with the same hyperparameters across
+multiple seeds.
 
 Runs all seeds in a single process (rather than one subprocess per seed) so
 JAX's jit cache for `train_step` is populated once and reused across seeds,
-instead of being recompiled from scratch for every seed.
+instead of being recompiled from scratch for every seed. Checkpoints are
+saved directly under ``out_dir/<seed>/<step>`` (no game-name subfolder).
 """
 import argparse
 import sys
@@ -11,7 +13,7 @@ import traceback
 from pathlib import Path
 
 from main import build_env, run_training
-from src.games import BIASED_GAME_CHOICES, GAME_CHOICES, GAME_LONG_NAME
+from src.games import BIASED_GAME_CHOICES, GAME_CHOICES
 
 
 def parse_args() -> argparse.Namespace:
@@ -82,7 +84,7 @@ def main() -> None:
         print(f"SEED {seed}")
         print(f"{'='*60}")
         try:
-            run_training(args, seed, game, network, optimizer)
+            run_training(args, seed, game, network, optimizer, game_subdir=False)
             results[seed] = True
         except Exception:
             traceback.print_exc()
@@ -93,7 +95,7 @@ def main() -> None:
     print("Summary:")
     for seed, ok in results.items():
         status = "OK" if ok else "FAILED"
-        save_path = Path(args.out_dir) / GAME_LONG_NAME[args.game] / str(seed) / str(args.n_steps)
+        save_path = Path(args.out_dir) / str(seed) / str(args.n_steps)
         print(f"  seed {seed:4d}: {status}  -> {save_path}")
 
     failed = [s for s, ok in results.items() if not ok]

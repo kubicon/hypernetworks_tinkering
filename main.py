@@ -157,6 +157,7 @@ def run_training(
     game: NormalFormGame,
     network: GeneralMLP,
     optimizer: optax.GradientTransformation,
+    game_subdir: bool = True,
 ) -> None:
     state_dim = int(game.state_representation().shape[0])
 
@@ -166,7 +167,10 @@ def run_training(
     p1_state = init_player_state(network, state_dim, rng_p1, optimizer)
     p2_state = init_player_state(network, state_dim, rng_p2, optimizer)
 
-    save_root = Path(args.out_dir) / GAME_LONG_NAME[args.game] / str(seed)
+    save_root = Path(args.out_dir)
+    if game_subdir:
+        save_root = save_root / GAME_LONG_NAME[args.game]
+    save_root = save_root / str(seed)
     print(f"Game:  {args.game}" + (f"  bias={args.bias}" if args.game in BIASED_GAME_CHOICES else ""))
     print(f"Saves: {save_root}/<step>/")
     print()
