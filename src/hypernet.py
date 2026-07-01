@@ -1,21 +1,17 @@
 """Hypernetwork auto-encoder over trained policy-network weights.
 
 This is a proof-of-concept that learns a low-dimensional *embedding* of an
-entire trained network.  The pipeline is a plain auto-encoder operating in
-weight space:
+entire trained network.  The pipeline is an auto-encoder whose encoder reads
+weight space but whose decoder outputs behaviour, not weights:
 
     encoder:  theta (flat weight vector)  ->  z (latent embedding)
-    decoder:  z                           ->  theta_hat (reconstructed weights)
+    decoder:  z                           ->  pi_hat (reconstructed strategy)
 
-The decoder is the "hypernetwork": a network whose output *is the weights of
-another network*.  Here it generates the 1346 parameters of a GeneralMLP
-policy from a small latent code.
-
-Two reconstruction signals are used:
-  * weight-space MSE   -- match the raw (standardized) parameters.
-  * behavioural KL     -- run the reconstructed weights through the policy
-                          network on the (fixed) game input and match the
-                          resulting action distribution.
+The decoder never reconstructs any of the 1346 parameters of the GeneralMLP
+policy; it maps the latent code straight to action-distribution logits, so it
+is trained solely against a behavioural signal:
+  * behavioural KL -- match the policy's action distribution on the (fixed)
+                      game input.
 
 See ``train_hypernet.py`` for the training loop and the notes printed there
 about weight-space symmetries, which are the main subtlety with this approach.
@@ -220,12 +216,15 @@ def load_weight_dataset(
 # ---------------------------------------------------------------------------
 
 class HyperAE(nn.Module):
-    """Weight-space auto-encoder.
+    """Weight-space encoder / strategy-space decoder.
 
     The encoder compresses a flat weight vector to ``latent_dim`` numbers; the
-    decoder (the hypernetwork) regenerates the full weight vector from them.
+    decoder does not regenerate any weights -- it maps the latent straight to
+    the policy's action-distribution logits, so it only ever has to learn to
+    reconstruct the *strategy*, never the underlying parameters.
     """
     weight_dim: int
+    output_dim: int = 2
     latent_dim: int = 8
     enc_dims: tuple[int, ...] = (256, 128)
     dec_dims: tuple[int, ...] = (128, 256)
@@ -234,12 +233,12 @@ class HyperAE(nn.Module):
         self.enc_layers = [nn.Dense(h) for h in self.enc_dims]
         self.to_latent = nn.Dense(self.latent_dim)
         self.dec_layers = [nn.Dense(h) for h in self.dec_dims]
-        self.to_weights = nn.Dense(self.weight_dim)
+        self.to_policy = nn.Dense(self.output_dim)
 
     def __call__(self, theta: jnp.ndarray):
         z = self.encode(theta)
-        theta_hat = self.decode(z)
-        return theta_hat, z
+        policy_logits = self.decode(z)
+        return policy_logits, z
 
     def encode(self, theta: jnp.ndarray) -> jnp.ndarray:
         x = theta
@@ -248,7 +247,8 @@ class HyperAE(nn.Module):
         return self.to_latent(x)
 
     def decode(self, z: jnp.ndarray) -> jnp.ndarray:
+        """Latent -> policy logits (softmax gives the action distribution)."""
         x = z
         for layer in self.dec_layers:
             x = nn.gelu(layer(x))
-        return self.to_weights(x)
+        return self.to_policy(x)

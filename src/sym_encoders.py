@@ -12,8 +12,10 @@ widths, depth, or whether normalization is present (e.g. biased_matching_pennies
 
 The encoders read the **raw** flat weight vector (per-dimension standardization
 would break permutation symmetry) and apply a per-tensor, per-sample
-normalization internally. The decoder still reconstructs the standardized
-vector. Selectable encoders: "mlp", "canon", "deepsets", "graph", "equiv".
+normalization internally. The decoder does not reconstruct weights at all --
+it maps the latent directly to policy (action-distribution) logits, so it is
+trained purely to reproduce the network's strategy. Selectable encoders:
+"mlp", "canon", "deepsets", "graph", "equiv".
 """
 
 from __future__ import annotations
@@ -362,7 +364,9 @@ class SymHyperAE(nn.Module):
     """Auto-encoder with a selectable (optionally symmetry-aware) encoder.
 
     The encoder reads raw weights (except "mlp", which reads the standardized
-    vector); the decoder always reconstructs the standardized weight vector.
+    vector); the decoder does *not* reconstruct any weights. Instead it maps
+    the latent straight to the policy's action-distribution logits, so it is
+    only ever trained to reproduce the network's *strategy*.
     """
     weight_dim: int
     spec: ArchSpec
@@ -373,17 +377,18 @@ class SymHyperAE(nn.Module):
     def setup(self) -> None:
         self.encoder = make_encoder(self.encoder_name, self.latent_dim, self.spec)
         self.dec_layers = [nn.Dense(h) for h in self.dec_dims]
-        self.to_weights = nn.Dense(self.weight_dim)
+        self.to_policy = nn.Dense(self.spec.output_dim)
 
     def encode(self, theta_std, theta_raw):
         inp = theta_std if self.encoder_name == "mlp" else theta_raw
         return self.encoder(inp)
 
     def decode(self, z):
+        """Latent -> policy logits (softmax gives the action distribution)."""
         x = z
         for layer in self.dec_layers:
             x = nn.gelu(layer(x))
-        return self.to_weights(x)
+        return self.to_policy(x)
 
     def __call__(self, theta_std, theta_raw):
         z = self.encode(theta_std, theta_raw)

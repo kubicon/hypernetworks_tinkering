@@ -13,7 +13,8 @@ HypernetArchitecture.md):
     graph     graph metanetwork / message passing               (symmetry: A)
     equiv     NFN/DWSNet-style equivariant-linear layers         (symmetry: C)
 
-Loss = weight-space MSE + behaviour_coef * behavioural KL.
+Loss = behaviour_coef * behavioural KL (the decoder outputs policy logits
+directly and is never trained to reconstruct any weights).
 
 Outputs (in --out_dir): embeddings_<encoder>.npz, embeddings_<encoder>.png,
 ae_params_<encoder>.pkl.
@@ -64,7 +65,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--epochs", type=int, default=300)
     p.add_argument("--batch_size", type=int, default=256)
     p.add_argument("--lr", type=float, default=1e-3)
-    p.add_argument("--recon_coef", type=float, default=1.0)
     p.add_argument("--behaviour_coef", type=float, default=1.0)
     p.add_argument("--augment", action="store_true",
                    help="Apply random valid weight-space permutations each step.")
@@ -104,10 +104,8 @@ def main() -> None:
     Xraw = jnp.asarray(ds.weights)              # raw weights (for sym encoders)
     mean = jnp.asarray(ds.mean)
     std = jnp.asarray(ds.std)
-    Xstd = (Xraw - mean) / std                  # per-dim standardized (decoder target)
+    Xstd = (Xraw - mean) / std                  # per-dim standardized (encoder input)
     true_pol = jnp.asarray(ds.policies)
-    state_in = game.state_representation()
-    unravel = ds.unravel
 
     model = SymHyperAE(weight_dim=ds.dim, spec=spec, encoder_name=args.encoder,
                        latent_dim=args.latent_dim)
@@ -116,23 +114,18 @@ def main() -> None:
     opt = optax.adam(args.lr)
     opt_state = opt.init(params)
 
-    def behaviour(theta_std):
-        theta = theta_std * std + mean
-        return jax.nn.softmax(net.apply(unravel(theta), state_in))
-
     def loss_fn(params, x_std, x_raw, tgt_pol):
-        x_hat, _ = model.apply(params, x_std, x_raw)
-        recon = jnp.mean((x_hat - x_std) ** 2)
-        behav = jnp.mean(kl(tgt_pol, jax.vmap(behaviour)(x_hat)))
-        total = args.recon_coef * recon + args.behaviour_coef * behav
-        return total, (recon, behav)
+        policy_logits, _ = model.apply(params, x_std, x_raw)
+        behav = jnp.mean(kl(tgt_pol, jax.nn.softmax(policy_logits)))
+        total = args.behaviour_coef * behav
+        return total, behav
 
     @jax.jit
     def update(params, opt_state, x_std, x_raw, tgt_pol):
-        (total, (recon, behav)), grads = jax.value_and_grad(
+        (total, behav), grads = jax.value_and_grad(
             loss_fn, has_aux=True)(params, x_std, x_raw, tgt_pol)
         updates, opt_state = opt.update(grads, opt_state)
-        return optax.apply_updates(params, updates), opt_state, total, recon, behav
+        return optax.apply_updates(params, updates), opt_state, total, behav
 
     @jax.jit
     def augment(x_raw, key):
@@ -159,21 +152,20 @@ def main() -> None:
     aug_key = jax.random.PRNGKey(args.seed + 1)
     for epoch in range(start_epoch, args.epochs):
         perm = rng.permutation(n)
-        s_total = s_recon = s_behav = 0.0
+        s_total = s_behav = 0.0
         for i in range(0, n, args.batch_size):
             idx = perm[i:i + args.batch_size]
             xr, xs, tp = Xraw[idx], Xstd[idx], true_pol[idx]
             if args.augment:
                 aug_key, k = jax.random.split(aug_key)
                 xr, xs = augment(xr, k)
-            params, opt_state, total, recon, behav = update(
+            params, opt_state, total, behav = update(
                 params, opt_state, xs, xr, tp)
             bs = idx.shape[0]
             s_total += float(total) * bs
-            s_recon += float(recon) * bs
             s_behav += float(behav) * bs
         monitor.record(epoch, {
-            "loss": s_total / n, "recon": s_recon / n, "behav_kl": s_behav / n,
+            "loss": s_total / n, "behav_kl": s_behav / n,
         }, state=checkpoint_state, force_log=epoch == args.epochs - 1)
     monitor.ckpt.save(args.epochs - 1, checkpoint_state)
     monitor.close()
@@ -185,10 +177,10 @@ def main() -> None:
     Z = np.asarray(encode_all(params, Xstd, Xraw))
 
     @jax.jit
-    def recon_pol(params, x_std, x_raw):
-        x_hat, _ = model.apply(params, x_std, x_raw)
-        return jax.vmap(behaviour)(x_hat)
-    pred_pol = np.asarray(recon_pol(params, Xstd, Xraw))
+    def decoded_pol(params, x_std, x_raw):
+        policy_logits, _ = model.apply(params, x_std, x_raw)
+        return jax.nn.softmax(policy_logits)
+    pred_pol = np.asarray(decoded_pol(params, Xstd, Xraw))
     behav_mae = np.mean(np.abs(pred_pol - ds.policies))
     print(f"\nMean |policy - reconstructed policy|: {behav_mae:.4f}")
 

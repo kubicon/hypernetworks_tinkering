@@ -54,7 +54,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--epochs", type=int, default=200)
     p.add_argument("--batch_size", type=int, default=256)
     p.add_argument("--lr", type=float, default=1e-3)
-    p.add_argument("--recon_coef", type=float, default=1.0)
     p.add_argument("--behaviour_coef", type=float, default=1.0)
     p.add_argument("--br_coef", type=float, default=1.0)
     p.add_argument("--br_target", default="action", choices=["action", "value"],
@@ -93,8 +92,6 @@ def main() -> None:
     mean, std = jnp.asarray(ds.mean), jnp.asarray(ds.std)
     X = (Xraw - mean) / std
     true_pol = jnp.asarray(ds.policies)
-    state_in = game.state_representation()
-    unravel = ds.unravel
 
     br_tgt_np, is_p2net_np, is_p1net_np = br_targets_per_sample(
         A, ds.policies, ds.players)
@@ -133,17 +130,14 @@ def main() -> None:
     opt = optax.adam(args.lr)
     opt_state = opt.init(params)
 
-    def behaviour(theta_std):
-        return jax.nn.softmax(net.apply(unravel(theta_std * std + mean), state_in))
-
     def forward(params, x_std, x_raw):
-        x_hat, z = ae.apply(params["ae"], x_std, x_raw)
-        return x_hat, z, br1.apply(params["br_p1"], z), br2.apply(params["br_p2"], z)
+        policy_logits, z = ae.apply(params["ae"], x_std, x_raw)
+        return (policy_logits, z, br1.apply(params["br_p1"], z),
+                br2.apply(params["br_p2"], z))
 
     def loss_fn(params, x_std, x_raw, tgt_pol, btgt, bval, m1, m2):
-        x_hat, z, logits1, logits2 = forward(params, x_std, x_raw)
-        recon = jnp.mean((x_hat - x_std) ** 2)
-        behav = jnp.mean(kl(tgt_pol, jax.vmap(behaviour)(x_hat)))
+        policy_logits, z, logits1, logits2 = forward(params, x_std, x_raw)
+        behav = jnp.mean(kl(tgt_pol, jax.nn.softmax(policy_logits)))
         if is_value:
             # Regress the scalar best-response value instead of classifying
             # the action itself.
@@ -157,8 +151,8 @@ def main() -> None:
             ok2 = (jnp.argmax(logits2, -1) == btgt) * m2
             metric = jnp.sum(ok1 + ok2)               # count correct
         br = jnp.sum(l1 * m1 + l2 * m2) / x_std.shape[0]
-        total = args.recon_coef * recon + args.behaviour_coef * behav + args.br_coef * br
-        return total, (recon, behav, br, metric)
+        total = args.behaviour_coef * behav + args.br_coef * br
+        return total, (behav, br, metric)
 
     @jax.jit
     def update(params, opt_state, x_std, x_raw, tgt_pol, btgt, bval, m1, m2):
@@ -217,7 +211,7 @@ def main() -> None:
     for epoch in range(start_epoch, args.epochs):
         perm = train_idx[rng.permutation(n)]
         # Sample-weighted sums over the epoch's batches.
-        s_total = s_recon = s_behav = s_br = s_metric = 0.0
+        s_total = s_behav = s_br = s_metric = 0.0
         for i in range(0, n, args.batch_size):
             idx = perm[i:i + args.batch_size]
             xr, xs = Xraw[idx], X[idx]
@@ -227,16 +221,15 @@ def main() -> None:
             params, opt_state, total, aux = update(
                 params, opt_state, xs, xr, true_pol[idx], br_tgt[idx],
                 br_val[idx], is_p2[idx], is_p1[idx])
-            recon, behav, br, metric = aux
+            behav, br, metric = aux
             bs = idx.shape[0]
             s_total += float(total) * bs
-            s_recon += float(recon) * bs
             s_behav += float(behav) * bs
             s_br += float(br) * bs
             s_metric += float(metric)
         last = epoch == args.epochs - 1
         monitor.record(epoch, {
-            "loss": s_total / n, "recon": s_recon / n, "behav_kl": s_behav / n,
+            "loss": s_total / n, "behav_kl": s_behav / n,
             "br_loss": s_br / n, f"train_br_{metric_name}": s_metric / n,
             f"test_br_{metric_name}": float(test_metric(params)),
         }, state=checkpoint_state, force_log=last)

@@ -7,9 +7,11 @@ single optimizer and are trained together.  Gradients from the best-response
 loss flow *into the encoder*, so the latent embedding is shaped both to
 reconstruct the weights and to be useful for predicting best responses.
 
+The decoder never reconstructs any weights -- it maps the latent straight to
+policy logits, so it is only ever trained against behavioural + BR signals.
+
 Total loss per sample =
-      recon_mse                              (weight-space reconstruction)
-    + behaviour_coef * behaviour_kl          (policy of reconstructed weights)
+      behaviour_coef * behaviour_kl          (policy decoded from the latent)
     + br_coef        * best_response_ce       (BR head for the relevant player)
 
 Each sample is one (seed, step, player) network.  A player-2 network's
@@ -65,7 +67,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--epochs", type=int, default=300)
     p.add_argument("--batch_size", type=int, default=256)
     p.add_argument("--lr", type=float, default=1e-3)
-    p.add_argument("--recon_coef", type=float, default=1.0)
     p.add_argument("--behaviour_coef", type=float, default=1.0)
     p.add_argument("--br_coef", type=float, default=1.0,
                    help="Weight on the best-response loss (shapes the embedding).")
@@ -119,8 +120,6 @@ def main() -> None:
     std = jnp.asarray(ds.std)
     X = (Xraw - mean) / std                         # per-dim standardized
     true_pol = jnp.asarray(ds.policies)
-    state_in = game.state_representation()
-    unravel = ds.unravel
 
     br_tgt_np, is_p2net_np, is_p1net_np = br_targets_per_sample(
         A, ds.policies, ds.players)
@@ -154,26 +153,21 @@ def main() -> None:
     opt = optax.adam(args.lr)
     opt_state = opt.init(params)
 
-    def behaviour(theta_std):
-        theta = theta_std * std + mean
-        return jax.nn.softmax(net.apply(unravel(theta), state_in))
-
     def forward(params, x_std, x_raw):
-        x_hat, z = ae.apply(params["ae"], x_std, x_raw)
+        policy_logits, z = ae.apply(params["ae"], x_std, x_raw)
         logits1 = br1.apply(params["br_p1"], z)
         logits2 = br2.apply(params["br_p2"], z)
-        return x_hat, z, logits1, logits2
+        return policy_logits, z, logits1, logits2
 
     def loss_fn(params, x_std, x_raw, tgt_pol, btgt, m_p1head, m_p2head):
-        x_hat, z, logits1, logits2 = forward(params, x_std, x_raw)
-        recon = jnp.mean((x_hat - x_std) ** 2)
-        behav = jnp.mean(kl(tgt_pol, jax.vmap(behaviour)(x_hat)))
+        policy_logits, z, logits1, logits2 = forward(params, x_std, x_raw)
+        behav = jnp.mean(kl(tgt_pol, jax.nn.softmax(policy_logits)))
         ce1 = optax.softmax_cross_entropy_with_integer_labels(logits1, btgt)
         ce2 = optax.softmax_cross_entropy_with_integer_labels(logits2, btgt)
         # Each sample contributes to exactly one head; average over all samples.
         br = jnp.sum(ce1 * m_p1head + ce2 * m_p2head) / x_std.shape[0]
-        total = args.recon_coef * recon + args.behaviour_coef * behav + args.br_coef * br
-        return total, (recon, behav, br)
+        total = args.behaviour_coef * behav + args.br_coef * br
+        return total, (behav, br)
 
     @jax.jit
     def update(params, opt_state, x_std, x_raw, tgt_pol, btgt, m1, m2):
@@ -206,7 +200,7 @@ def main() -> None:
     aug_key = jax.random.PRNGKey(args.seed + 1)
     for epoch in range(start_epoch, args.epochs):
         perm = train_idx[rng_np.permutation(n)]
-        s_total = s_recon = s_behav = s_br = 0.0
+        s_total = s_behav = s_br = 0.0
         for i in range(0, n, args.batch_size):
             idx = perm[i:i + args.batch_size]
             xr, xs = Xraw[idx], X[idx]
@@ -217,14 +211,13 @@ def main() -> None:
             params, opt_state, total, aux = update(
                 params, opt_state, xs, xr, true_pol[idx], br_tgt[idx],
                 is_p2[idx], is_p1[idx])
-            recon, behav, br = aux
+            behav, br = aux
             bs = idx.shape[0]
             s_total += float(total) * bs
-            s_recon += float(recon) * bs
             s_behav += float(behav) * bs
             s_br += float(br) * bs
         monitor.record(epoch, {
-            "loss": s_total / n, "recon": s_recon / n,
+            "loss": s_total / n,
             "behav_kl": s_behav / n, "br_ce": s_br / n,
         }, state=checkpoint_state, force_log=epoch == args.epochs - 1)
     monitor.ckpt.save(args.epochs - 1, checkpoint_state)
